@@ -163,3 +163,7 @@ AmaneProxy\
 - `servers.json` 是**明文**保存节点密码的（和多数代理客户端一样）；`logs\` 里会记录你访问过的域名。
   分享自己的整份安装目录前，记得删掉 `servers.json`、`amaneproxy.json`、`config.json`、`logs\`。
 - 内核 sing-box 由 [SagerNet](https://github.com/SagerNet/sing-box) 提供，GPL-3.0，版权与许可见 `bin\LICENSE`。
+
+
+## 12. 声明
+本程序由DeepSeek4.1 flash模型辅助生成
