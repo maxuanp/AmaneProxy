@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Amane 代理调度器</title>
+<style>
+  :root{
+    --bg:#16181d; --panel:#1e2128; --panel2:#23262e; --line:#33373f; --fg:#e6e8ec;
+    --dim:#9aa0ab; --brand:#4c8dff; --ok:#37b24d; --warn:#f59f00; --bad:#e03131;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:9}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--bad);display:inline-block}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .grow{flex:1}
+  .tabs{display:flex;gap:6px;padding:12px 20px 0}
+  .tab{padding:7px 14px;border-radius:8px 8px 0 0;background:transparent;color:var(--dim);border:1px solid transparent;border-bottom:none;cursor:pointer;font-size:13px}
+  .tab.on{background:var(--panel);color:var(--fg);border-color:var(--line);font-weight:600}
+  main{padding:16px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+  .card h2{margin:0 0 10px;font-size:14px;font-weight:600;color:var(--fg)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--brand)}
+  button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+  button.bad{border-color:var(--bad);color:#ff8787}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input,select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--dim);font-weight:500}
+  code{background:var(--panel2);padding:1px 6px;border-radius:5px;font-family:Consolas,monospace;font-size:12px}
+  .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+  .pill.ok{color:#8ce99a;border-color:#2b8a3e}
+  .pill.bad{color:#ffa8a8;border-color:#c92a2a}
+  .pill.dim{color:var(--dim)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .muted{color:var(--dim);font-size:12px}
+  pre{background:#111317;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:340px;overflow:auto;font-size:12px;margin:0}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+  .kv div:nth-child(odd){color:var(--dim)}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#252a33;border:1px solid var(--line);padding:9px 16px;border-radius:8px;z-index:99}
+  .toast.err{border-color:var(--bad);color:#ffa8a8}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Amane 代理调度器</h1>
+  <span class="muted" id="ver"></span>
+  <span class="grow"></span>
+  <span class="muted" id="entry"></span>
+  <button onclick="ctl('start')">启动</button>
+  <button onclick="ctl('restart')">重启内核</button>
+  <button onclick="ctl('stop')">停止</button>
+  <button class="primary" onclick="ctl('probe')">立即探测</button>
+</header>
+
+<div class="tabs">
+  <button class="tab on" data-tab="ov" onclick="showTab('ov')">总览</button>
+  <button class="tab" data-tab="rules" onclick="showTab('rules')">分流规则</button>
+  <button class="tab" data-tab="sync" onclick="showTab('sync')">域名同步</button>
+  <button class="tab" data-tab="amane" onclick="showTab('amane')">Amane 集成</button>
+  <button class="tab" data-tab="log" onclick="showTab('log')">日志</button>
+</div>
+
+<main>
+  <section id="tab-ov">
+    <div class="card">
+      <h2>默认出口</h2>
+      <div class="row">
+        <select id="defaultOut" onchange="saveSettings({default_outbound:this.value})">
+          <option value="auto">自动（在可用出口里选最快）</option>
+          <option value="direct">直连（不经代理）</option>
+          <option value="jp">日本</option><option value="kr">韩国</option><option value="us">美国</option>
+        </select>
+        <label class="muted"><input type="checkbox" id="failover" onchange="saveSettings({auto_failover:this.checked})"> 出口故障自动转移</label>
+        <label class="muted"><input type="checkbox" id="trayChk" onchange="saveSettings({tray:this.checked})"> 系统托盘图标</label>
+        <span class="muted">未命中任何规则的域名走这里</span>
+      </div>
+    </div>
+    <div class="grid" id="servers"></div>
+    <div class="card">
+      <h2>出口管理</h2>
+      <table><thead><tr><th>id</th><th>类型</th><th>服务器</th><th>端口</th><th>SNI</th><th>跳过证书</th><th>密码</th><th></th></tr></thead><tbody id="serverEdit"></tbody></table>
+      <div class="muted" style="margin:8px 0">密码留空 = 不改动。保存后会自动重启内核（1~2 秒）。</div>
+      <h2>新增出口</h2>
+      <div class="row">
+        <input id="nsId" placeholder="id 如 jp2" style="width:100px">
+        <select id="nsKind"><option value="hysteria2">hysteria2</option><option value="shadowsocks">shadowsocks</option><option value="socks">socks(本地客户端)</option></select>
+        <input id="nsServer" placeholder="服务器地址" style="width:170px">
+        <input id="nsPort" placeholder="端口" style="width:80px">
+        <input id="nsSni" placeholder="SNI(可选)" style="width:150px">
+        <input id="nsPass" placeholder="密码" style="width:130px">
+        <select id="nsCc"><option value="jp">日本</option><option value="kr">韩国</option><option value="us">美国</option><option value="hk">香港</option><option value="sg">新加坡</option></select>
+        <button class="primary" onclick="addServer()">新增</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>自动转移记录</h2>
+      <pre id="failog" style="max-height:140px"></pre>
+    </div>
+  </section>
+
+  <section id="tab-rules" style="display:none">
+    <div class="card">
+      <h2>一键预设</h2>
+      <div class="row" id="presets"></div>
+      <div class="muted" style="margin-top:8px">预设只按域名后缀插入规则，可随后手动增删。</div>
+    </div>
+    <div class="card">
+      <h2>新增规则</h2>
+      <div class="row">
+        <select id="rType"><option value="domain_suffix">域名后缀</option><option value="domain">完整域名</option>
+          <option value="domain_keyword">域名关键字</option><option value="domain_regex">正则</option></select>
+        <input id="rValue" placeholder="例如 dmm.co.jp" style="min-width:240px" />
+        <select id="rOut"><option value="jp">→ 日本</option><option value="us">→ 美国</option>
+          <option value="kr">→ 韩国</option><option value="direct">→ 直连</option><option value="auto">→ 自动</option></select>
+        <button class="primary" onclick="addRule()">添加</button>
+        <button class="bad" onclick="rules({action:'clear'})">清空全部</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>规则表 <span class="muted" id="ruleCount"></span></h2>
+      <table><thead><tr><th>类型</th><th>值</th><th>出口</th><th>生效出口标签</th><th>来源</th><th></th></tr></thead><tbody id="rules"></tbody></table>
+      <div class="row" style="margin-top:10px">
+        <button onclick="rules({action:'clear_auto'})">清空自动规则（域名同步加的）</button>
+        <span class="muted">预设=preset:xxx，自动=auto:amane:来源 / auto:redirect:旧域名 / auto:candidate:旧域名</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>分流自检</h2>
+      <div class="row"><button class="primary" onclick="selftest()">对规则里的域名各发一次连接，看实际出口</button></div>
+      <div id="selftestOut" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section id="tab-sync" style="display:none">
+    <div class="card">
+      <h2>自动获取网站最新域名 <span class="muted" id="syncSummary"></span></h2>
+      <div class="row">
+        <label class="muted"><input type="checkbox" id="syEnabled" onchange="syncSet({enabled:this.checked})"> 启用定时同步</label>
+        <label class="muted">间隔 <input id="syInterval" type="number" min="0.25" step="0.25" style="width:80px" onchange="syncSet({interval_hours:parseFloat(this.value)||6})"> 小时</label>
+        <label class="muted"><input type="checkbox" id="syAmane" onchange="syncSet({from_amane:this.checked})"> 从 Amane 的源配置/网络检测取域名</label>
+        <label class="muted"><input type="checkbox" id="syFollow" onchange="syncSet({follow_redirect:this.checked})"> 跟随站点跳转（换域名的站点几乎都留 301）</label>
+        <label class="muted"><input type="checkbox" id="syCand" onchange="syncSet({try_candidates:this.checked})"> 主域名不通时试候选域名</label>
+        <label class="muted"><input type="checkbox" id="syTune" onchange="syncSet({tune_outbound:this.checked})"> 出口实测调优</label>
+        <label class="muted">模式
+          <select id="syTuneMode" onchange="syncSet({tune_mode:this.value})">
+            <option value="fallback">原出口不通才换（保留地域意图）</option>
+            <option value="fastest">总是选最快能通的（可能换国家）</option>
+          </select>
+        </label>
+        <button class="primary" onclick="syncRun()">立即同步</button>
+        <button onclick="syncRun(true)">强制重测全部域名</button>
+        <button onclick="syncSet({action:'clear_log'})">清空日志</button>
+        <button onclick="syncSet({action:'clear_tuned'})">清除实测调优</button>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        同步会把新发现的域名写成规则（标为 <code>auto:*</code>），按“来源→出口”映射决定走哪个出口；
+        不会动你手动和预设的规则。定时任务在内核重启后 25 秒跑第一次，之后每隔上面的小时数跑一次。
+      </div>
+    </div>
+    <div class="card">
+      <h2>同步日志</h2>
+      <pre id="syncLog" style="max-height:260px"></pre>
+    </div>
+    <div class="card">
+      <h2>域名状态 <span class="muted" id="domainCount"></span></h2>
+      <table><thead><tr><th>域名</th><th>出口</th><th>来源</th><th>连通</th><th>各出口实测</th><th>跳转到</th><th>检查时间</th><th></th></tr></thead><tbody id="domains"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>来源 → 出口映射</h2>
+      <div class="muted">每行一条 <code>来源=出口</code>，出口可填 <code>jp/kr/us/direct/default</code>（default = 默认出口）。未列出的来源走默认出口。</div>
+      <textarea id="syMap" rows="6" style="width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:Consolas,monospace"></textarea>
+      <div class="row" style="margin-top:8px"><button onclick="syncSaveMap()">保存映射</button><span class="muted">例: theporndb=us / javdb=jp / official=jp</span></div>
+    </div>
+    <div class="card">
+      <h2>候选域名（主域名死了、也不跳转时的备选）</h2>
+      <div class="muted">每行一条 <code>主域名=候选1,候选2</code>。例: <code>javbus.com=javbus.xyz,javbus.info</code></div>
+      <textarea id="syCands" rows="4" style="width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:Consolas,monospace"></textarea>
+      <div class="row" style="margin-top:8px"><button onclick="syncSaveCands()">保存候选</button></div>
+    </div>
+    <div class="card">
+      <h2>永不调优的域名（地域敏感站，不管调优模式都不换出口）</h2>
+      <div class="muted">一行一个域名。默认：dmm.co.jp / dmm.com / fanza.jp / amazon.co.jp / fujisan.co.jp（只认日本 IP）</div>
+      <textarea id="syNever" rows="3" style="width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:Consolas,monospace"></textarea>
+      <div class="row" style="margin-top:8px"><button onclick="syncSaveNever()">保存</button></div>
+    </div>
+    <div class="card">
+      <h2>Amane 各来源探测结果（上次同步时）</h2>
+      <div id="amaneStatus" class="muted"></div>
+    </div>
+  </section>
+
+  <section id="tab-amane" style="display:none">
+    <div class="card">
+      <h2>Amane 网络出口</h2>
+      <div class="kv" id="amaneInfo"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="amane('enable')">让 Amane 走本调度器</button>
+        <button onclick="amane('disable')">还原接入前的值</button>
+        <button onclick="amane('set', prompt('直接指定 network.proxy（留空=直连）')||'')">自定义值…</button>
+        <button onclick="post('/api/open-amane',{})">打开 Amane 界面</button>
+      </div>
+      <div class="muted" style="margin-top:10px">
+        原理：把 Amane 的 <code>network.proxy</code> 指向 <code id="entryHint"></code>（本调度器的混合入口）。
+        Amane 的刮削、图片代理、HLS、下载都会走这里，由调度器按域名分流。<br>
+        用 <b>http</b> 而不是 socks5：走 SOCKS5 时 httpx 会先把域名在本地解析成 IP 再交给代理，
+        按域名分流就失效了（DNS 被污染时拿到的 IP 也没用）。HTTP CONNECT 会把域名原样带过来。
+      </div>
+    </div>
+    <div class="card">
+      <h2>手动指定出口</h2>
+      <table><thead><tr><th>选择器</th><th>当前成员</th><th>切到</th></tr></thead><tbody id="sels"></tbody></table>
+      <div class="muted" style="margin-top:8px">手动切换后，下一次健康检查若发现主出口已恢复，会自动切回主出口（可在总览关掉自动转移）。</div>
+    </div>
+  </section>
+
+  <section id="tab-log" style="display:none">
+    <div class="card">
+      <h2>调度器日志 <span class="muted">logs/amaneproxy.log</span></h2>
+      <pre id="log1"></pre>
+    </div>
+    <div class="card">
+      <h2>内核日志 <span class="muted">logs/sing-box.log</span></h2>
+      <pre id="log2"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+let ST = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const CC = {jp:'日本',kr:'韩国',us:'美国',hk:'香港',sg:'新加坡',tw:'台湾'};
+
+function toast(msg, err){
+  const n = document.createElement('div');
+  n.className = 'toast' + (err?' err':''); n.textContent = msg;
+  document.body.appendChild(n); setTimeout(()=>n.remove(), err?5000:2200);
+}
+async function post(path, body){
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({error:'响应解析失败'}));
+  if (!r.ok || j.error) { toast(j.error || ('HTTP '+r.status), true); throw new Error(j.error||r.status); }
+  if (j.state) { ST = j.state; render(); }
+  return j;
+}
+async function refresh(){
+  try { ST = await (await fetch('/api/state')).json(); render(); } catch(e){ toast('无法连接调度器: '+e.message, true); }
+}
+function showTab(t){
+  for (const el of document.querySelectorAll('.tab')) el.classList.toggle('on', el.dataset.tab===t);
+  for (const s of ['ov','rules','sync','amane','log']) $('tab-'+s).style.display = (s===t?'':'none');
+  localStorage.setItem('ap_tab', t);
+  if (t==='log') loadLog();
+}
+function ctl(action){ post('/api/control', {action}).then(()=>toast('已执行: '+action)).catch(()=>{}); }
+function saveSettings(obj){ post('/api/settings', obj).then(()=>toast('已保存')).catch(()=>{}); }
+function rules(body){ post('/api/rules', body).then(()=>toast('规则已更新')).catch(()=>{}); }
+function amane(action, proxy){ post('/api/amane', {action, proxy}).then(()=>toast('已处理: '+action)).catch(()=>{}); }
+
+function addRule(){
+  const v = $('rValue').value.trim();
+  if (!v) return toast('请填域名', true);
+  rules({action:'add', type:$('rType').value, value:v, outbound:$('rOut').value});
+  $('rValue').value = '';
+}
+
+function render(){
+  if (!ST) return;
+  $('dot').className = 'dot' + (ST.running?' on':'');
+  $('ver').textContent = 'v'+ST.version + (ST.singbox_version? ' · '+ST.singbox_version : '');
+  $('entry').innerHTML = '入口 <code>127.0.0.1:'+ST.ports.entry+'</code>';
+  if (ST.error) toast(ST.error, true);
+
+  $('defaultOut').value = ST.settings.default_outbound;
+  $('failover').checked = !!ST.settings.auto_failover;
+  $('trayChk').checked = ST.settings.tray !== false;
+  $('entryHint').textContent = 'http://127.0.0.1:'+ST.ports.entry;
+
+  // 出口卡片
+  $('servers').innerHTML = ST.servers.map(s=>{
+    const p = ST.probe[s.id] || {};
+    const sel = ST.selectors['sel-'+s.cc];
+    const healthy = p.ok ? 'ok' : 'bad';
+    const isPrimary = (sel === s.id);
+    const members = ST.servers.map(x=>x.id).concat(['direct']);
+    return `<div class="card">
+      <h2>${esc(s.label)} <span class="pill ${healthy}">${p.ok?'可用':'不可用'}</span>
+        ${isPrimary?'':'<span class="pill dim">已转移出</span>'}</h2>
+      <div class="kv">
+        <div>出口 IP</div><div><code>${esc(p.ip||'—')}</code> ${esc(p.country||'')}${p.city?' / '+esc(p.city):''}</div>
+        <div>服务商</div><div>${esc(p.isp||'—')}</div>
+        <div>延迟</div><div>${p.ms!=null? p.ms+' ms':'—'}</div>
+        <div>服务器</div><div><code>${esc(s.server)}:${esc(s.port)}</code> ${esc(s.kind)}</div>
+        <div>选择器</div><div><code>sel-${esc(s.cc)}</code> 当前 <b>${esc(sel||'?')}</b></div>
+        ${p.error?`<div>错误</div><div class="muted">${esc(p.error)}</div>`:''}
+      </div>
+      <div class="row" style="margin-top:10px">
+        <select onchange="post('/api/select',{tag:'sel-'+'${esc(s.cc)}',member:this.value})">
+          ${members.map(m=>`<option value="${m}" ${m===sel?'selected':''}>${m}</option>`).join('')}
+        </select>
+        <button onclick="testOne('${esc(s.id)}')">测这个出口</button>
+        ${s.note?`<span class="muted">${esc(s.note)}</span>`:''}
+      </div>
+    </div>`;
+  }).join('');
+
+  $('failog').textContent = (ST.failover_log||[]).join('\n') || '（暂无）';
+
+  // 出口编辑
+  $('serverEdit').innerHTML = (ST.servers||[]).map(s=>`<tr data-id="${esc(s.id)}">
+      <td><code>${esc(s.id)}</code></td>
+      <td><select data-f="kind"><option ${s.kind==='hysteria2'?'selected':''}>hysteria2</option>
+          <option ${s.kind==='shadowsocks'?'selected':''}>shadowsocks</option>
+          <option ${s.kind==='socks'?'selected':''}>socks</option></select></td>
+      <td><input data-f="server" value="${esc(s.server)}" style="width:150px"></td>
+      <td><input data-f="port" value="${esc(s.port)}" style="width:70px"></td>
+      <td><input data-f="sni" value="${esc(s.sni||'')}" style="width:130px"></td>
+      <td><input type="checkbox" data-f="insecure" ${s.insecure?'checked':''}></td>
+      <td><input data-f="password" placeholder="${s.has_password?'已设置':'未设置'}" style="width:110px"></td>
+      <td><button onclick="saveServer('${esc(s.id)}',this)">保存</button>
+          <button class="bad" onclick="delServer('${esc(s.id)}')">删除</button></td></tr>`).join('');
+
+  // 规则
+  const tbody = ST.rules.map((r,i)=>`<tr>
+      <td>${esc(r.type)}</td><td><code>${esc(r.value)}</code></td>
+      <td>${esc(CC[r.outbound]||r.outbound||'默认')}${(ST.sync&&ST.sync.tuned&&ST.sync.tuned[r.value])?` <span class="pill ok">实测改走 ${esc(ST.sync.tuned[r.value])}</span>`:''}</td>
+      <td class="muted">${esc(r.outbound==='auto'?'sel-auto':(r.outbound==='direct'?'direct':'sel-'+r.outbound))}</td>
+      <td class="muted">${esc(r.src||'—')}</td>
+      <td><button class="bad" onclick="rules({action:'del',index:${i}})">删除</button></td></tr>`).join('');
+  $('rules').innerHTML = tbody || '<tr><td colspan="6" class="muted">（空）</td></tr>';
+  $('ruleCount').textContent = ST.rules.length ? `共 ${ST.rules.length} 条` : '';
+  renderSync();
+
+  $('presets').innerHTML = Object.entries(ST.presets||{}).map(([k,v])=>
+    `<button onclick="rules({action:'insert_preset',preset:'${k}'})">插入：${esc(v.label)}（${v.count} 个域名）</button>
+     <button class="bad" onclick="rules({action:'remove_preset',preset:'${k}'})">移除：${esc(v.label)}</button>`).join('');
+
+  // Amane
+  const a = ST.amane || {};
+  $('amaneInfo').innerHTML = `
+    <div>可达</div><div>${a.reachable?'<span class="pill ok">是</span>':'<span class="pill bad">否</span> '+esc(a.error||'')}</div>
+    <div>token 文件</div><div>${a.token?'已找到':'<span class="pill bad">未找到</span>'}</div>
+    <div>当前 network.proxy</div><div><code>${esc(a.proxy==null?'（未设置=直连）':a.proxy)}</code></div>
+    <div>接入前原值</div><div><code>${esc(ST.settings.amaneproxy_previous==null?'—':ST.settings.amaneproxy_previous)}</code></div>
+    <div>是否已接入</div><div>${ST.settings.amaneproxy_enabled?'<span class="pill ok">是</span>':'<span class="pill dim">否</span>'}</div>`;
+
+  $('sels').innerHTML = (ST.servers||[]).map(s=>{
+    const tag = 'sel-'+s.cc;
+    const cur = ST.selectors[tag];
+    const members = ST.servers.map(x=>x.id).concat(['direct']);
+    return `<tr><td><code>${tag}</code>（${esc(s.label)}）</td><td><b>${esc(cur||'?')}</b></td>
+      <td><select onchange="post('/api/select',{tag:'${tag}',member:this.value})">
+        ${members.map(m=>`<option value="${m}" ${m===cur?'selected':''}>${m}</option>`).join('')}
+      </select></td></tr>`;
+  }).join('');
+}
+
+async function testOne(id){ await ctl('probe'); toast(id+' 探测完成'); }
+
+// ---------------- 域名同步 ----------------
+function syncSet(body){ post('/api/sync', body).then(()=>toast('已保存')).catch(()=>{}); }
+function syncRun(force){
+  post('/api/sync', {action:'run', force: !!force}).then(r=>{
+    toast((r.sync && r.sync.skipped) ? '已有同步在进行中' : '已在后台同步（最近测通的域名会跳过，几十秒内完成）');
+  }).catch(()=>{});
+}
+function syncSaveMap(){
+  post('/api/sync', {source_outbound_text: $('syMap').value}).then(()=>toast('映射已保存')).catch(()=>{});
+}
+function syncSaveCands(){
+  post('/api/sync', {candidates_text: $('syCands').value}).then(()=>toast('候选已保存')).catch(()=>{});
+}
+function syncSaveNever(){
+  post('/api/sync', {tune_never_text: $('syNever').value}).then(()=>toast('已保存')).catch(()=>{});
+}
+function renderSync(){
+  const sy = ST.sync || {};
+  $('syEnabled').checked = !!sy.enabled;
+  $('syAmane').checked = !!sy.from_amane;
+  $('syFollow').checked = !!sy.follow_redirect;
+  $('syCand').checked = !!sy.try_candidates;
+  $('syTune').checked = !!sy.tune_enabled;
+  if (document.activeElement !== $('syTuneMode')) $('syTuneMode').value = sy.tune_mode || 'fallback';
+  if (document.activeElement !== $('syInterval')) $('syInterval').value = sy.interval_hours;
+  const rep = sy.report || {};
+  const badge = sy.running ? ' <span class="pill bad">同步中…</span>' : '';
+  let sum = sy.last ? ('上次同步 ' + new Date(sy.last*1000).toLocaleString() + ' · 自动规则 ' + (sy.auto_rules||0) + ' 条 · 实测调优 ' + Object.keys(sy.tuned||{}).length + ' 条') : '尚未同步';
+  if (rep && rep.added) {
+    sum += ' · 上次结果: 新增 ' + rep.added.length + ' / 跳转 ' + (rep.redirects||[]).length + ' / 调优 ' + (rep.tuned||[]).length + ' / 未响应 ' + (rep.dead||[]).length + '  (检查 ' + (rep.checked||0) + ' 个)';
+  }
+  if (rep && rep.error) sum += ' · 上次失败: ' + rep.error;
+  $('syncSummary').innerHTML = sum + badge;
+  $('syncLog').textContent = (sy.log||[]).join('\n') || '（暂无）';
+
+  const st = sy.domain_status || {};
+  const tuned = sy.tuned || {};
+  const rows = ST.rules.filter(r=>r.type==='domain_suffix').map(r=>{
+    const d = st[r.value] || {};
+    const ok = d.ok===undefined ? '<span class="pill dim">未测</span>' : (d.ok?'<span class="pill ok">通</span>':'<span class="pill bad">未响应</span>');
+    const to = (d.final_root && d.final_root!==r.value) ? `<code>${esc(d.final_root)}</code>` : (d.final? '—' : '');
+    const bo = d.by_outbound ? Object.entries(d.by_outbound).map(([k,v])=>`${k}:${v.status}/${v.ms}ms`).join('  ') : '';
+    const tn = tuned[r.value] ? ` <span class="pill ok">实测改走 ${esc(tuned[r.value])}</span>` : '';
+    return `<tr><td><code>${esc(r.value)}</code></td><td>${esc(CC[r.outbound]||r.outbound)}${tn}</td>
+      <td class="muted">${esc(r.src||'—')}</td><td>${ok}${d.status?(' '+d.status):''}${d.err?' <span class="muted">'+esc(d.err)+'</span>':''}</td>
+      <td class="muted" style="font-family:Consolas,monospace;font-size:11px">${esc(bo)||'—'}</td>
+      <td>${to}</td><td class="muted">${d.ts? new Date(d.ts*1000).toLocaleTimeString():'—'}</td>
+      <td><button class="bad" onclick="rules({action:'del',index:${ST.rules.indexOf(r)}})">删除</button></td></tr>`;
+  }).join('');
+  $('domains').innerHTML = rows || '<tr><td colspan="8" class="muted">（无域名规则）</td></tr>';
+  $('domainCount').textContent = `共 ${ST.rules.filter(r=>r.type==='domain_suffix').length} 条`;
+
+  if (document.activeElement !== $('syMap')) {
+    $('syMap').value = Object.entries(sy.source_outbound||{}).map(([k,v])=>k+'='+v).join('\n');
+  }
+  if (document.activeElement !== $('syCands')) {
+    $('syCands').value = Object.entries(sy.candidates||{}).map(([k,v])=>k+'='+(Array.isArray(v)?v.join(','):v)).join('\n');
+  }
+  if (document.activeElement !== $('syNever')) {
+    $('syNever').value = (sy.tune_never||[]).join('\n');
+  }
+  const rep2 = ST.sync_report || (ST.sync && ST.sync.report) || null;
+  if (rep2 && rep2.amane_status) {
+    $('amaneStatus').innerHTML = Object.entries(rep2.amane_status).map(([k,v])=>
+      `<span class="pill ${v==='ok'?'ok':'bad'}">${esc(k)}: ${esc(v)}</span>`).join(' ') || '—';
+  } else {
+    $('amaneStatus').textContent = '（还没有同步过）';
+  }
+}
+
+function saveServer(id, btn){
+  const tr = btn.closest('tr');
+  const body = {id};
+  for (const el of tr.querySelectorAll('[data-f]')) {
+    const f = el.dataset.f;
+    if (f === 'insecure') body.insecure = el.checked;
+    else if (f === 'password') { if (el.value) body.password = el.value; }
+    else if (f === 'port') { if (el.value) body.port = parseInt(el.value,10); }
+    else body[f] = el.value;
+  }
+  post('/api/servers', body).then(()=>toast('已保存并重启内核')).catch(()=>{});
+}
+function delServer(id){
+  if (!confirm('删除出口 '+id+' ?')) return;
+  post('/api/server-del', {id}).then(()=>toast('已删除')).catch(()=>{});
+}
+function addServer(){
+  const body = {id:$('nsId').value.trim(), kind:$('nsKind').value, server:$('nsServer').value.trim(),
+                port:parseInt($('nsPort').value,10)||0, sni:$('nsSni').value.trim(),
+                password:$('nsPass').value, cc:$('nsCc').value};
+  if (!body.id || !body.server || !body.port) return toast('id / 地址 / 端口 都要填', true);
+  post('/api/server-add', body).then(()=>toast('已新增')).catch(()=>{});
+}
+
+async function selftest(){
+  $('selftestOut').innerHTML = '<span class="muted">测试中…（最多 10 个域名）</span>';
+  try{
+    const r = await (await fetch('/api/selftest')).json();
+    if (r.error) throw new Error(r.error);
+    $('selftestOut').innerHTML = `<table><thead><tr><th>域名</th><th>期望出口</th><th>实际出口</th><th>TCP</th><th>结果</th></tr></thead><tbody>` +
+      r.cases.map(c=>`<tr><td><code>${esc(c.host)}</code></td><td>${esc(c.expect||'-')}</td><td><b>${esc(c.actual)}</b></td>
+        <td>${c.connected?'✔':'✘'}</td>
+        <td>${c.match===null?'<span class="pill dim">—</span>':(c.match?'<span class="pill ok">一致</span>':'<span class="pill bad">不一致</span>')}</td></tr>`).join('') +
+      '</tbody></table>';
+  }catch(e){ $('selftestOut').innerHTML = '<span class="pill bad">'+esc(e.message)+'</span>'; }
+}
+
+async function loadLog(){
+  try{
+    const r = await (await fetch('/api/log?tail=200')).json();
+    $('log1').textContent = (r['amaneproxy.log']||[]).join('\n');
+    $('log2').textContent = (r['sing-box.log']||[]).join('\n');
+  }catch(e){}
+}
+
+showTab((location.hash || '').replace('#','') || localStorage.getItem('ap_tab') || 'ov');
+refresh();
+setInterval(refresh, 5000);
+setInterval(()=>{ if ($('tab-log').style.display !== 'none') loadLog(); }, 5000);
+</script>
+</body>
+</html>
