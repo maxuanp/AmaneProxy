@@ -1,0 +1,12 @@
+# 容器 / shell / 代码文件统一用 LF；Windows 专用脚本保持 CRLF
+*.sh                text eol=lf
+Dockerfile          text eol=lf
+*.yml               text eol=lf
+*.py                text eol=lf
+*.md                text eol=lf
+*.html              text eol=lf
+*.json              text eol=lf
+*.ps1               text eol=crlf
+*.vbs               text eol=crlf
+*.cmd               text eol=crlf
+*.ico               binary

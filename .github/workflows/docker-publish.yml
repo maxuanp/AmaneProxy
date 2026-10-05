@@ -1,0 +1,138 @@
+name: docker
+
+# ① 构建 amd64 + arm64 镜像并推到 GHCR（ghcr.io/maxuanp/amaneproxy）
+# ② 单独跑一遍「把容器真的起起来、面板 API 能通」的冒烟测试
+# ③ 打 v* tag 时自动创建 GitHub Release
+# 触发：推 main / 打 v* tag / 手动运行
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            # main 分支和 v* tag 都更新 latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch
+            # 打 v1.4.0 -> 镜像 tag 1.4.0
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    name: 容器冒烟测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 linux/amd64 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: amaneproxy:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 起容器并访问面板 API
+        run: |
+          set -eux
+          docker run -d --name amaneproxy-ci \
+            -p 127.0.0.1:18110:18110 -p 127.0.0.1:18111:18111 \
+            --add-host host.docker.internal:host-gateway \
+            -v /tmp/amaneproxy-ci-data:/data \
+            amaneproxy:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18111/api/state -o /tmp/state.json; then break; fi
+            sleep 2
+          done
+          test -s /tmp/state.json
+          python3 -c "import json;st=json.load(open('/tmp/state.json'));print('version', st['version'], 'ports', st['ports'], 'rules', len(st['rules']));assert st['version']"
+          docker exec amaneproxy-ci /usr/local/bin/sing-box version
+          docker exec amaneproxy-ci python /app/amaneproxy.py --status
+          test -f /tmp/amaneproxy-ci-data/amaneproxy.json
+          docker logs amaneproxy-ci | tail -n 40
+
+      - name: 失败时打印日志
+        if: failure()
+        run: |
+          docker logs amaneproxy-ci || true
+          docker inspect amaneproxy-ci --format '{{json .State}}' || true
+
+  release:
+    name: 创建 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AmaneProxy ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            ## 安装
+
+            **Docker（推荐 Linux/NAS）：**
+
+            ```bash
+            docker run -d --name amaneproxy --restart unless-stopped \
+              -p 127.0.0.1:18110:18110 -p 127.0.0.1:18111:18111 \
+              --add-host host.docker.internal:host-gateway \
+              -v amaneproxy-data:/data \
+              ghcr.io/maxuanp/amaneproxy:latest
+            ```
+
+            （也可以把 `latest` 换成不带 v 的版本号，如 `1.4.0`）
+
+            或者用 compose / 自己构建（含国内加速与离线构建方案）：见 README 第 3 节。
+
+            **Windows：** 下载下方 Source code (zip)，解压后双击 `install.cmd`；
+            精简版没有内核，`setup.py` 会自动下载（国内可以先准备一个能用的代理）。
+
+            详细说明见 [README](https://github.com/maxuanp/AmaneProxy#readme) ·
+            [CHANGELOG](https://github.com/maxuanp/AmaneProxy/blob/main/CHANGELOG.md) ·
+            [本次改动](https://github.com/maxuanp/AmaneProxy/commits/${{ github.ref_name }})

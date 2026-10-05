@@ -37,6 +37,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import ssl
@@ -52,9 +53,34 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.3.0"
-ROOT = Path(__file__).resolve().parent
-BIN = ROOT / "bin" / "sing-box.exe"
+VERSION = "1.4.0"
+APP_DIR = Path(__file__).resolve().parent          # 代码/资源目录 (Docker 镜像里 = /app)
+# 数据目录: 配置 / 规则 / 日志 / pid 都写这里。
+# Docker 里设 AMANEPROXY_HOME=/data 并挂成卷, 升级镜像不会丢配置。
+ROOT = Path(os.environ.get("AMANEPROXY_HOME") or APP_DIR).resolve()
+PANEL_HTML = next((p for p in (APP_DIR / "panel.html", ROOT / "panel.html") if p.is_file()),
+                  APP_DIR / "panel.html")
+
+
+def _find_singbox() -> Path:
+    """找内核: 环境变量 AMANEPROXY_SINGBOX > 代码目录/数据目录下的 bin/ > PATH。
+
+    Windows 上是 bin\\sing-box.exe; Linux/Docker 上是 bin/sing-box (或 /usr/local/bin/sing-box)。
+    """
+    env = os.environ.get("AMANEPROXY_SINGBOX")
+    if env:
+        return Path(env)
+    for cand in (APP_DIR / "bin" / "sing-box.exe", APP_DIR / "bin" / "sing-box",
+                 ROOT / "bin" / "sing-box.exe", ROOT / "bin" / "sing-box"):
+        if cand.is_file():
+            return cand
+    found = shutil.which("sing-box")
+    if found:
+        return Path(found)
+    return APP_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box")
+
+
+BIN = _find_singbox()
 LOGDIR = ROOT / "logs"
 CONFIG_PATH = ROOT / "config.json"
 SETTINGS_PATH = ROOT / "amaneproxy.json"
@@ -73,6 +99,12 @@ DEFAULT_SETTINGS = {
     "panel_port": 18111,          # 本地面板
     "clash_port": 18112,          # sing-box 内部 clash API
     "clash_secret": "",
+    # ---- 监听地址 (Docker/容器里设 0.0.0.0 才能被端口映射到; 也可用环境变量覆盖) ----
+    "listen_host": "127.0.0.1",   # 代理入口   (AMANEPROXY_LISTEN_HOST)
+    "panel_host": "127.0.0.1",    # 面板       (AMANEPROXY_PANEL_HOST)
+    # ---- Amane 本地 API (容器里改成 http://host.docker.internal:18100) ----
+    "amane_url": "http://127.0.0.1:18100",   # (AMANEPROXY_AMANE_URL)
+    "amane_token_file": "",       # Amane token 文件; 留空=自动找 (容器里挂载后填 /data/amane-token)
     "default_outbound": "jp",     # auto | direct | jp | kr | us ...
     "health_interval": 60,        # 秒
     "auto_failover": True,
@@ -398,11 +430,27 @@ def socks_get(port: int, host: str, path: str = "/", https: bool = True, timeout
 
 
 class Service:
+    # 环境变量覆盖: 优先级 env > amaneproxy.json > 默认值。Docker 里用 env 传端口/监听地址,
+    # 这样同一份镜像能直接跑, 不用先改配置。（env 提供的键不会落盘）
+    ENV_MAP = {
+        "proxy_port": ("AMANEPROXY_PROXY_PORT", int),
+        "panel_port": ("AMANEPROXY_PANEL_PORT", int),
+        "clash_port": ("AMANEPROXY_CLASH_PORT", int),
+        "listen_host": ("AMANEPROXY_LISTEN_HOST", str),
+        "panel_host": ("AMANEPROXY_PANEL_HOST", str),
+        "amane_url": ("AMANEPROXY_AMANE_URL", str),
+        "amane_token_file": ("AMANEPROXY_AMANE_TOKEN_FILE", str),
+        "default_outbound": ("AMANEPROXY_DEFAULT_OUTBOUND", str),
+        "tray": ("AMANEPROXY_TRAY", lambda v: str(v).strip().lower() in ("1", "true", "yes", "on")),
+    }
+
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
+        self.env_keys: set[str] = set()
         self.settings = read_json(SETTINGS_PATH, DEFAULT_SETTINGS)
         for k, v in DEFAULT_SETTINGS.items():
             self.settings.setdefault(k, v)
+        self.apply_env()
         self.servers = read_json(SERVERS_PATH, {"servers": DEFAULT_SERVERS}).get("servers") or DEFAULT_SERVERS
         for s in self.servers:
             s.setdefault("cc", s["id"])
@@ -422,8 +470,22 @@ class Service:
 
     # ---------------- 持久化 ----------------
 
+    def apply_env(self) -> None:
+        for key, (env, cast) in self.ENV_MAP.items():
+            raw = os.environ.get(env)
+            if raw is None or raw == "":
+                continue
+            try:
+                self.settings[key] = cast(raw)
+                self.env_keys.add(key)
+            except Exception:
+                log("环境变量 %s=%r 无效, 已忽略" % (env, raw))
+
     def save_settings(self):
-        write_json(SETTINGS_PATH, self.settings)
+        disk = dict(self.settings)
+        for k in self.env_keys:
+            disk.pop(k, None)        # 环境变量管的键不写回文件, 保持 amaneproxy.json 干净
+        write_json(SETTINGS_PATH, disk)
 
     def save_servers(self):
         write_json(SERVERS_PATH, {"servers": self.servers})
@@ -433,6 +495,8 @@ class Service:
 
     def bootstrap_files(self):
         """把默认文件写到磁盘 (首次运行)。"""
+        ROOT.mkdir(parents=True, exist_ok=True)   # 数据目录 (Docker 里是挂进来的卷)
+        LOGDIR.mkdir(parents=True, exist_ok=True)
         if not SETTINGS_PATH.exists():
             self.save_settings()
         if not SERVERS_PATH.exists():
@@ -518,7 +582,7 @@ class Service:
         outbounds.append({"type": "direct", "tag": "direct"})
 
         inbounds = [{
-            "type": "mixed", "tag": "entry", "listen": "127.0.0.1",
+            "type": "mixed", "tag": "entry", "listen": self.settings.get("listen_host") or "127.0.0.1",
             "listen_port": int(self.settings["proxy_port"]),
         }]
         probe_rules = []
@@ -763,16 +827,31 @@ class Service:
     # ---------------- Amane 集成 ----------------
 
     def amane_token(self) -> str | None:
-        for p in (Path(os.environ.get("LOCALAPPDATA", "")) / "Amane" / "token",):
+        env = os.environ.get("AMANEPROXY_AMANE_TOKEN")
+        if env and env.strip():
+            return env.strip()
+        cands: list[Path] = []
+        if self.settings.get("amane_token_file"):
+            cands.append(Path(str(self.settings["amane_token_file"])))
+        cands += [
+            ROOT / "amane-token",                                          # Docker: 挂进数据目录
+            Path(os.environ.get("LOCALAPPDATA") or "_") / "Amane" / "token",   # Windows
+            Path(os.environ.get("APPDATA") or "_") / "Amane" / "token",
+            Path.home() / ".local" / "share" / "Amane" / "token",           # Linux
+        ]
+        for p in cands:
             try:
                 if p.is_file():
-                    return p.read_text(encoding="utf-8").strip()
+                    tok = p.read_text(encoding="utf-8").strip()
+                    if tok:
+                        return tok
             except Exception:
                 continue
         return None
 
     def amane_url(self) -> str:
-        return "http://127.0.0.1:18100"
+        base = os.environ.get("AMANEPROXY_AMANE_URL") or self.settings.get("amane_url") or "http://127.0.0.1:18100"
+        return str(base).rstrip("/")
 
     def amane_get_config(self) -> dict:
         token = self.amane_token()
@@ -1282,7 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             if path in ("/", "/index.html"):
-                html = (ROOT / "panel.html").read_text(encoding="utf-8")
+                html = PANEL_HTML.read_text(encoding="utf-8")
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/state":
                 return self._json(SVC.snapshot())
@@ -1525,10 +1604,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve_panel() -> ThreadingHTTPServer:
     port = int(SVC.settings["panel_port"])
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    host = str(SVC.settings.get("panel_host") or "127.0.0.1")
+    httpd = ThreadingHTTPServer((host, port), Handler)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
-    log("面板: http://127.0.0.1:%d" % port)
+    log("面板: http://%s:%d" % ("127.0.0.1" if host in ("0.0.0.0", "::", "") else host, port))
     return httpd
 
 
@@ -1542,7 +1622,7 @@ def serve_panel() -> ThreadingHTTPServer:
 #   左键单击/双击 = 打开面板   右键 = 菜单(重启内核 / 同步域名 / 日志 / 退出)
 # 悬停提示: AmaneProxy vX · 运行中 · 默认 日本
 
-TRAY_ICON_DIR = ROOT / "bin"
+TRAY_ICON_DIR = APP_DIR / "bin"
 TRAY_ICON_FILES = {"on": "tray_on.ico", "off": "tray_off.ico", "err": "tray_err.ico"}
 TRAY: "TrayIcon | None" = None
 
@@ -2006,11 +2086,77 @@ def set_tray(enabled: bool) -> bool:
     return False
 
 
+def pid_alive(pid: int) -> bool:
+    """进程是否还活着 (跨平台)。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace",
+                                 creationflags=CREATE_NO_WINDOW, timeout=15).stdout
+            return str(pid) in (out or "")
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def pid_is_amaneproxy(pid: int) -> bool:
+    """确认这个 pid 真的是本程序。容器重启后 /data 里的旧 pid 可能撞上别的进程。"""
+    alive = pid_alive(pid)
+    if not alive or os.name == "nt":
+        return alive
+    try:
+        cmdline = Path("/proc/%d/cmdline" % pid).read_bytes().decode("utf-8", "replace")
+    except Exception:
+        return True          # 读不到 /proc 就保守当它是自己
+    return "amaneproxy" in cmdline
+
+
+def kill_pid(pid: int, tree: bool = True) -> bool:
+    """结束进程 (Windows 走 taskkill; POSIX 先 SIGTERM 再 SIGKILL)。"""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if os.name == "nt":
+        args = ["taskkill", "/PID", str(pid)] + (["/T"] if tree else []) + ["/F"]
+        subprocess.run(args, capture_output=True, creationflags=CREATE_NO_WINDOW)
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        return False
+    for _ in range(30):
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    return True
+
+
 # ---------------------------------------------------------------- 入口
 
 
 def cmd_status() -> int:
-    st = SVC.snapshot()
+    st = None
+    if not SVC.running():
+        # 常驻的管理器在别的进程里 (Docker / 无窗口运行) —— 直接问面板, 否则会误报成"没运行"
+        try:
+            st = http_json("http://127.0.0.1:%d/api/state" % int(SVC.settings["panel_port"]), timeout=6)
+        except Exception:
+            st = None
+    if st is None:
+        st = SVC.snapshot()
     print(json.dumps({
         "running": st["running"], "entry": st["ports"]["entry"], "panel": st["ports"]["panel"],
         "selectors": st["selectors"],
@@ -2026,14 +2172,13 @@ def cmd_stop() -> int:
     if PID_PATH.exists():
         try:
             pid = int(PID_PATH.read_text().strip())
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+            kill_pid(pid, tree=True)
             killed = True
         except Exception as e:
             print("停止失败:", e)
     if SB_PID_PATH.exists():
         try:
-            pid = int(SB_PID_PATH.read_text().strip())
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+            kill_pid(int(SB_PID_PATH.read_text().strip()), tree=False)
         except Exception:
             pass
     print("已停止" if killed else "没有找到运行中的管理器 (pid 文件不存在)")
@@ -2065,12 +2210,9 @@ def main() -> int:
     if PID_PATH.exists():
         try:
             old = int(PID_PATH.read_text().strip())
-            if old != os.getpid():
-                out = subprocess.run(["tasklist", "/FI", "PID eq %d" % old], capture_output=True, text=True,
-                                     creationflags=CREATE_NO_WINDOW).stdout
-                if str(old) in out:
-                    print("管理器已在运行 (pid %d), 面板 http://127.0.0.1:%s" % (old, SVC.settings["panel_port"]))
-                    return 0
+            if old != os.getpid() and pid_is_amaneproxy(old):
+                print("管理器已在运行 (pid %d), 面板 http://127.0.0.1:%s" % (old, SVC.settings["panel_port"]))
+                return 0
         except Exception:
             pass
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")

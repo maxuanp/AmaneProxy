@@ -1,0 +1,40 @@
+# AmaneProxy · Docker Compose
+#   docker compose up -d          启动（本地没有镜像会用上面的 Dockerfile 构建）
+#   docker compose logs -f        看日志
+#   docker compose down           停止
+# 面板: http://127.0.0.1:18111
+
+services:
+  amaneproxy:
+    image: ghcr.io/maxuanp/amaneproxy:latest
+    build:
+      context: .
+      # 国内拉不动 python 官方镜像时，换成镜像站地址：
+      # args:
+      #   PYTHON_IMAGE: "docker.m.daocloud.io/library/python:3.12-slim"
+    container_name: amaneproxy
+    restart: unless-stopped
+    ports:
+      # 只绑到宿主机回环：代理入口和面板都不暴露到局域网。
+      # 想让局域网里别的机器看面板，把面板那行改成 "18111:18111"。
+      - "127.0.0.1:18110:18110"   # 代理入口（Amane 的 network.proxy 指向它）
+      - "127.0.0.1:18111:18111"   # 面板
+    environment:
+      # 容器里的 127.0.0.1 是容器自己，不是宿主机 —— 访问宿主的 Amane 要用 host.docker.internal
+      AMANEPROXY_AMANE_URL: "http://host.docker.internal:18100"
+      TZ: "Asia/Shanghai"
+      # 不想挂载 token 文件的话，直接把内容传进来（面板的「Amane 集成」需要它）：
+      # AMANEPROXY_AMANE_TOKEN: "把 Amane 的 token 粘这里"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 上访问宿主机需要这行
+    volumes:
+      # 配置 / 分流规则 / 日志都写这里，别删
+      - ./data:/data
+      # 想让面板的「Amane 集成」读到宿主 Amane 的 token，取消注释并按实际路径改：
+      # Windows: ${LOCALAPPDATA}/Amane/token      Linux: ~/.local/share/Amane/token
+      # - C:/Users/你的用户名/AppData/Local/Amane/token:/data/amane-token:ro
+
+# 小提示：Linux 宿主也可以用 host 网络（容器与宿主共用网络栈，Amane 就能直接用 127.0.0.1）：
+#   network_mode: host
+#   （host 模式下上面的 ports: 不生效，也不用 extra_hosts；记得把
+#     AMANEPROXY_LISTEN_HOST / AMANEPROXY_PANEL_HOST 改回 127.0.0.1）

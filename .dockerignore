@@ -1,0 +1,32 @@
+# 只把「跑容器需要的东西」送进构建上下文，别的都排除
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+
+# 运行期数据（宿主机上的配置/规则/日志/pid）
+data
+logs
+*.pid
+amaneproxy.json
+servers.json
+rules.json
+config.json
+
+# Windows 专用脚本 / 托盘图标（Linux 镜像用不到）
+start.vbs
+ensure.ps1
+stop.ps1
+status.ps1
+install-autostart.ps1
+uninstall-autostart.ps1
+install.cmd
+backup-tasks
+bin
+
+# 构建产物 / 测试残留
+repo
+repo.zip
+smoketest
+*.log
