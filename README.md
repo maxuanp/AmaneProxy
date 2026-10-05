@@ -11,7 +11,10 @@
 
 [![docker build](https://github.com/maxuanp/AmaneProxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/maxuanp/AmaneProxy/actions/workflows/docker-publish.yml)
 **当前版本 v1.4.0** · [更新日志](CHANGELOG.md) · [Releases](https://github.com/maxuanp/AmaneProxy/releases) ·
-容器镜像 \`ghcr.io/maxuanp/amaneproxy\` · 许可 GPL-3.0
+容器镜像 `ghcr.io/maxuanp/amaneproxy` · 本程序 **MIT** 许可（内置的 sing-box 内核为 GPL-3.0）
+
+> **适合谁**：用 Amane 捣削元数据/看图，但不同站点要求不同地区出口的人；
+> 或者手上有日/韩/美多个节点，想让不同网站自动走对应出口、连接挂了还能自己切回来的人。
 
 ### 两种跑法，选一个就够
 
@@ -59,12 +62,16 @@ docker compose up -d          # 然后开 http://127.0.0.1:18111 ，在「总览
 
 ## 1. 系统要求
 
-- Windows 10 / 11（x64）
-- **Python 3.10+**（只用标准库，不需要 pip 装任何包）
-  - 安装时务必勾选 **Add python.exe to PATH**
-- 需要一个可用的代理出口（自己的 VPS 节点 / 机场订阅里的 hysteria2、shadowsocks，或本机已有的代理客户端）
-- 完整版压缩包已带 sing-box 内核；精简版没有内核，`setup.py` 会自动去 GitHub 下载（国内网络可能需要先有个能用的代理）
-- **或者用 Docker**（见第 3 节）：Linux / NAS / Docker Desktop 都行，镜像里自带内核和 Python，不用装环境
+**Windows 桌面版**
+
+- Windows 10 / 11（x64）+ **Python 3.10+**（只用标准库，不用 pip 装任何东西；安装时记得勾上 *Add python.exe to PATH*）
+- 一个能用的代理出口：自己的 VPS 节点、机场订阅里的 hysteria2 / shadowsocks，或者本机已经在跑的代理客户端
+- 内核：完整包自带 sing-box；精简包没有，`setup.py` 会自动去 GitHub 下（国内可以先准备一个能用的代理，
+  或手动把内核放进 `bin\`）
+
+**Docker 版**
+
+- 任何能跑 Docker 的 Linux / NAS / Docker Desktop，**不用装 Python**，镜像自带内核（构建细节见第 3 节）
 
 ## 2. 快速开始
 
@@ -383,13 +390,44 @@ AmaneProxy\
 
 ## 12. 隐私与安全
 
-- 压缩包里**没有**任何服务器地址、密码、订阅链接、token、日志和使用记录；`servers.json` 等文件是
-  首次运行在你本机生成的默认模板。
-- 所有服务只监听 `127.0.0.1`，不对外提供端口。
-- `servers.json` 是**明文**保存节点密码的（和多数代理客户端一样）；`logs\` 里会记录你访问过的域名。
-  分享自己的整份安装目录前，记得删掉 `servers.json`、`amaneproxy.json`、`config.json`、`logs\`。
-- 内核 sing-box 由 [SagerNet](https://github.com/SagerNet/sing-box) 提供，GPL-3.0，版权与许可见 `bin\LICENSE`。
+本节针对「把仓库 / 安装目录分享出去」这件事，发布前逐项扫过（文件内容 + 全部 git 历史）：
 
+**仓库里没有的**
 
-## 13. 声明
-本程序由DeepSeek4.1 flash模型辅助生成
+- 没有任何节点地址、端口、密码、订阅链接、token、API key、私钥；
+- 没有 `servers.json` / `amaneproxy.json` / `config.json` / `rules.json` / `logs\` ——
+  这些都是**首次运行时在你本机生成**的，所以仓库里没有任何使用记录、也没有你访问过的域名；
+- 没有开发者的个人路径、用户名、邮箱、机器名：脚本一律用 `$PSScriptRoot` / `ScriptFullName`
+  取自己所在目录，不写死盘符。
+
+**运行时要注意的**
+
+- 所有服务默认只监听 `127.0.0.1`，不对外提供端口（Docker 版默认也只把端口映射到宿主的回环地址）；
+- 面板**没有鉴权**，别把它直接暴露到公网；要远程看就开 SSH 隧道；
+- `servers.json` 是**明文**保存节点密码的（和多数代理客户端一样），`logs\` 里会记录你访问过的域名。
+  分享自己的整份安装目录（或 Docker 的数据卷）前，删掉 `servers.json`、`amaneproxy.json`、`config.json`、`logs\`；
+- 内核 sing-box 由 [SagerNet](https://github.com/SagerNet/sing-box) 提供（GPL-3.0），许可见它自己的 LICENSE；
+  本程序自身是 **MIT** 许可。
+
+## 13. 声明与 AI 参与说明
+
+**AI 参与情况（如实说明）**
+
+- 本项目是**作者 + AI 协作**的产物：需求、取舍、测试、发布由作者负责，代码与文档的大量内容由 AI 辅助生成或修改。
+- 用过的模型：DeepSeek 系列——早期版本由 “DeepSeek4.1 flash” 辅助生成；
+  v1.4.0 的 Docker 支持与本文档的这次改版由 AI 助手（Chatbox + DeepSeek）完成。
+- v1.4.0 是**在真机上验证过**才发布的：Ubuntu 22.04 + Docker 20.10（经典 builder），
+  构建 → 起容器 → 面板 API → 宿主经端口映射走代理拿到 200 → 健康检查 healthy → `docker stop` 干净退出，
+  内核 sing-box 1.14.2。
+- AI 生成的内容**不保证没有错误**。请把它当工具用，别当经过安全审计的产品；上线前自己过一眼配置
+  （出口凭据、绑定地址、面板暴露范围）。
+- AI 参与**不影响许可**：本程序是 MIT（见 `LICENSE`）；内置 / 下载的 sing-box 内核仍为 GPL-3.0。
+
+**免责**
+
+- 本程序只是一个**本地代理调度器**：不提供任何节点、订阅或加速服务，能不能访问某个站点取决于你自己的出口。
+- 请遵守你所在地区的法律法规和目标站点的服务条款，使用本程序所产生的一切后果由使用者自负。
+- 日志会记录访问过的域名，请自行保管好安装目录 / 数据卷。
+
+---
+本程序由 DeepSeek 系列模型辅助生成与维护（详见上面的「AI 参与说明」）。

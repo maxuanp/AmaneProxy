@@ -41,8 +41,14 @@
 **其它**
 
 - `setup.py` 支持 Linux：自动下载 `linux-amd64/arm64` 内核（tar.gz），不再复制 Windows 专用脚本，
-  默认安装目录变成 `~/.local/share/AmaneProxy`。
-- README 增加 Docker 章节（构建 / 环境变量 / 接入 Amane / 排错 / 与 Windows 版差异）。
+  默认安装目录变成 `%LOCALAPPDATA%\AmaneProxy` / `~/.local/share/AmaneProxy`（可用 `--root` 指定别处），
+  也不再硬编码开发者的盘符路径；nekoray profiles 只探标准位置。
+- README 改版：顶部加了「两种跑法」对照表、目录和「适合谁」；新增 **「声明与 AI 参与说明」**
+  （用过的模型、AI 参与了哪些部分、怎么验证的、免责）；「隐私与安全」一节写清仓库里有什么/没有什么。
+- 许可口径澄清：本程序是 **MIT**（见 `LICENSE`），内置 / 下载的 sing-box 内核是 GPL-3.0；
+  Dockerfile 的 `org.opencontainers.image.licenses` 标签同步改成 MIT。
+- 发布前做了一次隐私扫描（工作区文件 + 全部 git 历史，查 IP / token / 密码 / 私钥 / 个人路径 / 邮箱）：
+  仓库里没有节点信息、凭据、日志，也没有开发者的个人路径。
 - `.gitattributes` 强制 shell 与代码文件用 LF（避免容器里 `entrypoint.sh` 因 CRLF 报 exec format error）。
 
 **实测环境**：Ubuntu 22.04 + Docker 20.10（经典 builder），构建 35 秒（走加速前缀）/ 11 秒（离线内核包），

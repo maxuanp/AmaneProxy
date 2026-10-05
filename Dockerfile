@@ -38,7 +38,8 @@ FROM ${PYTHON_IMAGE}
 LABEL org.opencontainers.image.title="AmaneProxy" \
       org.opencontainers.image.description="按目标网站自动切换出口的本地代理调度器 (给 Amane 用)" \
       org.opencontainers.image.source="https://github.com/maxuanp/AmaneProxy" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="MIT"
+# 说明: 本程序是 MIT; 镜像里内置的 sing-box 内核是 GPL-3.0 (其 LICENSE 由内核包自带)
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

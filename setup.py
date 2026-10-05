@@ -3,7 +3,7 @@
 """Amane 代理调度器 · 安装脚本
 
 用法:
-    python setup.py                      # 装到默认目录 (O:\\AmaneProxy / %LOCALAPPDATA%\\AmaneProxy / ~/.local/share/AmaneProxy)
+    python setup.py                      # 装到默认目录 (%LOCALAPPDATA%\\AmaneProxy / ~/.local/share/AmaneProxy)
     python setup.py --root D:\\AmaneProxy --proxy http://127.0.0.1:1080
 
 做四件事:
@@ -43,9 +43,8 @@ if IS_WIN:
 SB_URL = ("https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-{ver}-windows-amd64.zip"
           if IS_WIN else
           "https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-{ver}-linux-%s.tar.gz" % ARCH)
-NEKO_PROFILES = [Path(r"O:\nekoray\config\profiles"),
-                 Path(os.environ.get("APPDATA", "")) / "nekoray" / "config" / "profiles",
-                 Path.home() / ".config" / "nekoray" / "config" / "profiles"]
+NEKO_PROFILES = [Path(os.environ.get("APPDATA") or "_") / "nekoray" / "config" / "profiles",
+                 Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "nekoray" / "config" / "profiles"]
 
 
 def latest_singbox_url(proxy: str | None) -> str:
@@ -156,13 +155,14 @@ def write_servers(root: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    if Path("O:/").exists():
-        default_root = Path("O:/AmaneProxy")
+    if os.environ.get("AMANEPROXY_ROOT"):
+        default_root = Path(os.environ["AMANEPROXY_ROOT"]).expanduser()
     elif IS_WIN:
         default_root = Path(os.environ.get("LOCALAPPDATA", ".")) / "AmaneProxy"
     else:
         default_root = Path.home() / ".local" / "share" / "AmaneProxy"
-    ap.add_argument("--root", default=str(default_root))
+    ap.add_argument("--root", default=str(default_root),
+                    help="安装目录 (默认 %s)" % default_root)
     ap.add_argument("--proxy", default="http://127.0.0.1:1080", help="下载内核用的本地代理, 留空=直连")
     ap.add_argument("--skip-kernel", action="store_true")
     args = ap.parse_args()
