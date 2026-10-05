@@ -1,4 +1,6 @@
 name: docker
+# 说明: action 统一用当前最新大版本 (2026-10 核对: checkout v7 / setup-qemu v4 / setup-buildx v4 /
+#       login v4 / metadata v6 / build-push v7 / action-gh-release v3), 免得踩 Node 20 运行时弃用。
 
 # ① 构建 amd64 + arm64 镜像并推到 GHCR（ghcr.io/maxuanp/amaneproxy）
 # ② 单独跑一遍「把容器真的起起来、面板 API 能通」的冒烟测试
@@ -22,18 +24,18 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
@@ -45,7 +47,7 @@ jobs:
             type=semver,pattern={{version}}
             type=sha,format=short
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -59,12 +61,12 @@ jobs:
     name: 容器冒烟测试
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: 构建 linux/amd64 镜像
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -105,10 +107,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 创建 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: AmaneProxy ${{ github.ref_name }}
           draft: false

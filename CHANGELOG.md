@@ -50,6 +50,9 @@
 - 发布前做了一次隐私扫描（工作区文件 + 全部 git 历史，查 IP / token / 密码 / 私钥 / 个人路径 / 邮箱）：
   仓库里没有节点信息、凭据、日志，也没有开发者的个人路径。
 - `.gitattributes` 强制 shell 与代码文件用 LF（避免容器里 `entrypoint.sh` 因 CRLF 报 exec format error）。
+- CI：action 升到当前最新大版本（`actions/checkout@v7` / `docker/setup-qemu-action@v4` /
+  `docker/setup-buildx-action@v4` / `docker/login-action@v4` / `docker/metadata-action@v6` /
+  `docker/build-push-action@v7` / `softprops/action-gh-release@v3`），避免 Node 20 运行时弃用告警。
 
 **实测环境**：Ubuntu 22.04 + Docker 20.10（经典 builder），构建 35 秒（走加速前缀）/ 11 秒（离线内核包），
 镜像 209MB，内核 sing-box 1.14.2；宿主经 `18110` 端口映射走代理返回 200，健康检查 healthy，
