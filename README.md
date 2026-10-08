@@ -10,7 +10,7 @@
 - 提供本地 Web 面板与**系统托盘图标**，日常操作无需使用命令行。
 
 [![docker build](https://github.com/maxuanp/AmaneProxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/maxuanp/AmaneProxy/actions/workflows/docker-publish.yml)
-**当前版本 v1.4.0** · [更新日志](CHANGELOG.md) · [Releases](https://github.com/maxuanp/AmaneProxy/releases) ·
+**当前版本 v1.4.1** · [更新日志](CHANGELOG.md) · [Releases](https://github.com/maxuanp/AmaneProxy/releases) ·
 容器镜像 `ghcr.io/maxuanp/amaneproxy` · 本程序 **MIT** 许可（内置的 sing-box 内核为 GPL-3.0）
 
 > **适用场景**：使用 Amane 刮削元数据或浏览图片，而不同站点要求不同地区出口的用户；

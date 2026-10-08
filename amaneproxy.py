@@ -53,7 +53,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 APP_DIR = Path(__file__).resolve().parent          # 代码/资源目录 (Docker 镜像里 = /app)
 # 数据目录: 配置 / 规则 / 日志 / pid 都写这里。
 # Docker 里设 AMANEPROXY_HOME=/data 并挂成卷, 升级镜像不会丢配置。
