@@ -236,7 +236,7 @@
 <script>
 let ST = null;
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = (s) => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const CC = {jp:'日本',kr:'韩国',us:'美国',hk:'香港',sg:'新加坡',tw:'台湾'};
 
 function toast(msg, err){
@@ -276,7 +276,7 @@ function render(){
   if (!ST) return;
   $('dot').className = 'dot' + (ST.running?' on':'');
   $('ver').textContent = 'v'+ST.version + (ST.singbox_version? ' · '+ST.singbox_version : '');
-  $('entry').innerHTML = '入口 <code>127.0.0.1:'+ST.ports.entry+'</code>';
+  $('entry').innerHTML = '入口 <code>127.0.0.1:'+esc(ST.ports.entry)+'</code>';
   if (ST.error) toast(ST.error, true);
 
   $('defaultOut').value = ST.settings.default_outbound;
@@ -397,7 +397,7 @@ function renderSync(){
   if (rep && rep.added) {
     sum += ' · 上次结果: 新增 ' + rep.added.length + ' / 跳转 ' + (rep.redirects||[]).length + ' / 调优 ' + (rep.tuned||[]).length + ' / 未响应 ' + (rep.dead||[]).length + '  (检查 ' + (rep.checked||0) + ' 个)';
   }
-  if (rep && rep.error) sum += ' · 上次失败: ' + rep.error;
+  if (rep && rep.error) sum += ' · 上次失败: ' + esc(rep.error);
   $('syncSummary').innerHTML = sum + badge;
   $('syncLog').textContent = (sy.log||[]).join('\n') || '（暂无）';
 

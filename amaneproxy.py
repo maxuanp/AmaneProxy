@@ -108,8 +108,6 @@ DEFAULT_SETTINGS = {
     "default_outbound": "jp",     # auto | direct | jp | kr | us ...
     "health_interval": 60,        # 秒
     "auto_failover": True,
-    "probe_url": "http://ip-api.com/json/?fields=status,message,country,countryCode,city,isp,query",
-    "probe_url_fallback": "https://api.ipify.org",
     "log_level": "info",
     "amaneproxy_enabled": False,   # 是否已把 Amane 指到本调度器
     "amaneproxy_previous": None,   # 接入前的 network.proxy 原值
@@ -229,6 +227,17 @@ UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
               "Chrome/126.0.0.0 Safari/537.36")
 
 
+def _recv_exact(sock, n: int) -> bytes:
+    """按长度读满 n 字节 (SOCKS 握手里的定长与变长字段都得读干净, 单次 recv 不保证读满)。"""
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise RuntimeError("连接提前关闭")
+        buf += chunk
+    return buf
+
+
 def probe_via_socks(socks_port: int, host: str, timeout: float = 10.0):
     """经某个出口的探测入口取一次 https://host/ 的状态码与耗时; 返回 (code, ms)。
     code: 0=无响应/超时, -1=出口本身连不上。"""
@@ -237,21 +246,21 @@ def probe_via_socks(socks_port: int, host: str, timeout: float = 10.0):
         s = socket.create_connection(("127.0.0.1", socks_port), timeout=timeout)
         s.settimeout(timeout)
         s.sendall(b"\x05\x01\x00")
-        if s.recv(2) != b"\x05\x00":
+        if _recv_exact(s, 2) != b"\x05\x00":
             return -1, int((time.time() - t0) * 1000)
         hb = host.encode()
         s.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack(">H", 443))
-        rep = s.recv(4)
-        if len(rep) < 2 or rep[1] != 0:
+        rep = _recv_exact(s, 4)
+        if rep[1] != 0:
             return -1, int((time.time() - t0) * 1000)
-        atyp = rep[3] if len(rep) > 3 else 1
+        atyp = rep[3]
         if atyp == 1:
-            s.recv(4)
+            _recv_exact(s, 4)
         elif atyp == 3:
-            s.recv(s.recv(1)[0])
+            _recv_exact(s, _recv_exact(s, 1)[0])
         elif atyp == 4:
-            s.recv(16)
-        s.recv(2)
+            _recv_exact(s, 16)
+        _recv_exact(s, 2)
         t = ssl.create_default_context().wrap_socket(s, server_hostname=host)
         t.sendall(("GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n\r\n"
                    % (host, UA_BROWSER)).encode())
@@ -362,6 +371,13 @@ def write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def as_bool(v) -> bool:
+    """统一布尔: JSON 真布尔直接用; "1"/"true"/"yes"/"on" 这类字符串也算真。"""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 def http_json(url: str, method="GET", body=None, headers=None, timeout=15, bearer=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     h = dict(headers or {})
@@ -387,22 +403,22 @@ def socks_get(port: int, host: str, path: str = "/", https: bool = True, timeout
     try:
         s.settimeout(timeout)
         s.sendall(b"\x05\x01\x00")
-        if s.recv(2) != b"\x05\x00":
+        if _recv_exact(s, 2) != b"\x05\x00":
             raise RuntimeError("socks5 greeting failed")
         hb = host.encode()
         tport = 443 if https else 80
         s.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack(">H", tport))
-        rep = s.recv(4)
-        if len(rep) < 2 or rep[1] != 0:
+        rep = _recv_exact(s, 4)
+        if rep[1] != 0:
             raise RuntimeError("socks5 connect refused (rep=%r)" % rep)
-        atyp = rep[3] if len(rep) > 3 else 1
+        atyp = rep[3]
         if atyp == 1:
-            s.recv(4)
+            _recv_exact(s, 4)
         elif atyp == 3:
-            s.recv(s.recv(1)[0])
+            _recv_exact(s, _recv_exact(s, 1)[0])
         elif atyp == 4:
-            s.recv(16)
-        s.recv(2)
+            _recv_exact(s, 16)
+        _recv_exact(s, 2)
         if https:
             sock = ssl.create_default_context().wrap_socket(s, server_hostname=host)
         else:
@@ -463,10 +479,13 @@ class Service:
         self.failover_log: list[str] = []
         self.error: str | None = None
         self.lock = threading.RLock()
+        self.rules_lock = threading.RLock()     # 规则表可能被面板与后台同步线程同时读写
         self.sync_lock = threading.Lock()
         self.stop_flag = threading.Event()
         self.geo_cache: dict[str, dict] = {}
-        self.countries = [s["cc"] for s in self.servers]
+        self.last_sync_report: dict | None = None
+        self._sb_version: str | None = None     # 内核版本不变, 缓存一次即可
+        self._amane_cache: tuple[float, dict] | None = None   # (ts, 结果), 面板轮询用的短缓存
 
     # ---------------- 持久化 ----------------
 
@@ -491,7 +510,10 @@ class Service:
         write_json(SERVERS_PATH, {"servers": self.servers})
 
     def save_rules(self):
-        write_json(RULES_PATH, {"rules": self.rules})
+        # 拷一份再落盘: 后台同步会原地 append, 直接 dump 会和它抢迭代器
+        with self.rules_lock:
+            rules = list(self.rules)
+        write_json(RULES_PATH, {"rules": rules})
 
     def bootstrap_files(self):
         """把默认文件写到磁盘 (首次运行)。"""
@@ -548,7 +570,7 @@ class Service:
             elif s["kind"] == "shadowsocks":
                 outbounds.append({
                     "type": "shadowsocks", "tag": s["id"], "server": s["server"],
-                    "server_port": int(s["port"]), "method": s.get("method", "none"),
+                    "server_port": int(s["port"]), "method": s.get("method") or "none",
                     "password": s.get("password", ""),
                 })
             elif s["kind"] == "socks":
@@ -563,14 +585,14 @@ class Service:
         # 同一个 cc 有多台(例如日本既有新 hysteria2 又有老 SSR)时只生成一个 selector,
         # 否则 tag 撞车 sing-box 直接起不来。首个为默认 -> 想换主出口只要调 servers.json 顺序。
         all_ids = [s["id"] for s in self.servers]
-        grouped: list[tuple[str, list[str]]] = []
+        groups: list[tuple[str, list[str]]] = []
         for s in self.servers:
-            hit = next((g for g in grouped if g[0] == s["cc"]), None)
+            hit = next((g for g in groups if g[0] == s["cc"]), None)
             if hit:
                 hit[1].append(s["id"])
             else:
-                grouped.append((s["cc"], [s["id"]]))
-        for cc, own in grouped:
+                groups.append((s["cc"], [s["id"]]))
+        for cc, own in groups:
             members = own + [x for x in all_ids if x not in own] + ["direct"]
             outbounds.append({"type": "selector", "tag": "sel-" + cc, "outbounds": members, "default": own[0]})
         if len(self.servers) > 1:
@@ -601,7 +623,9 @@ class Service:
 
         grouped: dict[str, dict] = {}
         tuned = self.settings.get("tuned_outbound") or {}
-        for r in self.rules:
+        with self.rules_lock:
+            rules = list(self.rules)
+        for r in rules:
             root = str(r.get("value", "")).lstrip(".")
             target = r.get("outbound") or self.settings["default_outbound"]
             if r.get("type", "domain_suffix") == "domain_suffix" and root in tuned:
@@ -721,6 +745,21 @@ class Service:
         self.stop_singbox()
         self.start_singbox()
         self.probe_all()
+
+    def reload_kernel(self) -> str | None:
+        """重载内核: 失败不抛异常, 返回错误信息(成功返回 None)。
+
+        规则/出口/设置这类接口都是「先落盘、后重启」, 重启失败时改动其实已经生效,
+        所以不能让它冒泡成 HTTP 500 (前端会误报「保存失败」且不刷新状态);
+        改为把原因写进 self.error, 交给面板的 state.error 展示。
+        """
+        try:
+            self.restart()
+            return None
+        except Exception as e:
+            self.error = str(e)
+            log("重载内核失败: %s" % e)
+            return str(e)
 
     # ---------------- 探测 / 出口 IP ----------------
 
@@ -869,6 +908,7 @@ class Service:
         http_json(self.amane_url() + "/api/config", method="PATCH", body={"network": network}, bearer=token, timeout=40)
         self.settings["amaneproxy_enabled"] = bool(value and "127.0.0.1:%d" % int(self.settings["proxy_port"]) in value)
         self.save_settings()
+        self._amane_cache = None      # 刚改过, 让面板立刻看到新的 proxy 而不是缓存值
         log("Amane network.proxy = %r" % value)
         return {"proxy": value, "previous": self.settings.get("amaneproxy_previous")}
 
@@ -896,7 +936,9 @@ class Service:
 
         cases = []
         seen = set()
-        for r in self.rules:
+        with self.rules_lock:
+            rules = list(self.rules)
+        for r in rules:
             if r.get("type") not in ("domain_suffix", "domain"):
                 continue
             host = str(r["value"]).lstrip(".")
@@ -910,18 +952,24 @@ class Service:
         results = []
         for c in cases:
             host = c["host"]
+            s = None
             try:
                 s = socket.create_connection(("127.0.0.1", int(self.settings["proxy_port"])), timeout=8)
                 s.settimeout(8)
                 s.sendall(b"\x05\x01\x00")
-                s.recv(2)
+                _recv_exact(s, 2)
                 hb = host.encode()
                 s.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack(">H", 443))
-                rep = s.recv(4)
-                s.close()
-                ok = len(rep) >= 2 and rep[1] == 0
+                rep = _recv_exact(s, 4)
+                ok = rep[1] == 0
             except Exception:
                 ok = False
+            finally:
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
             results.append({"host": host, "expect": c["expect"], "connected": ok})
 
         time.sleep(1.2)
@@ -953,7 +1001,9 @@ class Service:
         return self.settings["default_outbound"]
 
     def rule_outbound_of(self, root: str) -> str:
-        for r in self.rules:
+        with self.rules_lock:
+            rules = list(self.rules)
+        for r in rules:
             if str(r.get("value")).lstrip(".") == root:
                 return r.get("outbound") or self.settings["default_outbound"]
         return self.settings["default_outbound"]
@@ -1005,15 +1055,20 @@ class Service:
         cand_hits: list[dict] = []
         errors: list[str] = []
         amane_status: dict[str, str] = {}
-        rules_before = len(self.rules)
+        with self.rules_lock:
+            rules_before = len(self.rules)
 
         def has_rule(root: str) -> bool:
-            return any(str(r.get("value")).lstrip(".") == root for r in self.rules)
+            with self.rules_lock:
+                return any(str(r.get("value")).lstrip(".") == root for r in self.rules)
 
         def add_rule(root: str, outbound: str, src: str, note: str = "") -> bool:
-            if not root or has_rule(root):
-                return False
-            self.rules.append({"type": "domain_suffix", "value": root, "outbound": outbound, "src": src})
+            # 查重与插入在同一次持锁内完成, 避免与面板的规则编辑并发时重复插入
+            with self.rules_lock:
+                if not root or any(str(r.get("value")).lstrip(".") == root for r in self.rules):
+                    return False
+                self.rules.append({"type": "domain_suffix", "value": root,
+                                   "outbound": outbound, "src": src})
             added.append({"domain": root, "outbound": outbound, "src": src, "note": note})
             return True
 
@@ -1047,8 +1102,9 @@ class Service:
                 errors.append("Amane 网络检测失败: %s" % str(e)[:80])
 
         # ---- 2) 跟随跳转 / 存活状态 (并行) ----
-        targets = sorted({str(r.get("value")).lstrip(".") for r in self.rules
-                          if r.get("type") == "domain_suffix" and r.get("value")})[:max_domains]
+        with self.rules_lock:
+            targets = sorted({str(r.get("value")).lstrip(".") for r in self.rules
+                              if r.get("type") == "domain_suffix" and r.get("value")})[:max_domains]
         status: dict[str, dict] = {}
         if targets and (self.settings.get("sync_follow_redirect") or self.settings.get("sync_try_candidates")):
             status = self._check_domains(targets, force=force)
@@ -1112,7 +1168,8 @@ class Service:
         self.settings["sync_log"] = (lines + (self.settings.get("sync_log") or []))[:120]
         self.save_settings()          # 先落盘, 后面重载内核失败也不丢记录
 
-        rules_added = len(self.rules) - rules_before
+        with self.rules_lock:
+            rules_added = len(self.rules) - rules_before
         if rules_added or tuned_changed:
             if rules_added:
                 self.save_rules()
@@ -1127,7 +1184,8 @@ class Service:
 
         report = {"added": added, "redirects": redirects, "candidates": cand_hits, "dead": dead,
                   "checked": len(targets), "amane_status": amane_status, "errors": errors,
-                  "tuned": tune_notes, "rules_total": len(self.rules), "ts": self.settings["sync_last"]}
+                  "tuned": tune_notes, "rules_total": rules_before + rules_added,
+                  "ts": self.settings["sync_last"]}
         self.last_sync_report = report
         log("域名同步完成: +%d 规则, 跳转 +%d, 候选 +%d, 不通 %d" % (len(added), len(redirects), len(cand_hits), len(dead)))
         return report
@@ -1216,7 +1274,7 @@ class Service:
             cur_sid = sid_of_cc.get(eff_cc) if eff_cc else None
             cur_code = (bo.get(cur_sid) or {}).get("status")
             if mode != "fastest" and cur_sid and self._ok_code(cur_code):
-                # 原出口本来就通 -> 不动 (之前调优过的现在恢复了则撑销调优)
+                # 原出口本来就通 -> 不动 (之前调优过的现在恢复了则撤销调优)
                 if root in tuned:
                     tuned.pop(root)
                     something_changed = True
@@ -1231,7 +1289,7 @@ class Service:
                 tuned[root] = best_cc
                 something_changed = True
                 notes.append({"domain": root, "from": eff_cc or "默认", "to": best_cc, "why": why})
-        if something_changed or True:
+        if something_changed:
             self.settings["tuned_outbound"] = tuned
         return notes
 
@@ -1239,9 +1297,11 @@ class Service:
 
     def snapshot(self) -> dict:
         with self.lock:
+            with self.rules_lock:
+                rules = list(self.rules)      # 拷一份, 避免与面板/同步线程并发改动
             selectors = {}
-            for s in self.servers:
-                tag = "sel-" + s["cc"]
+            for cc in dict.fromkeys(s["cc"] for s in self.servers):   # 同一 cc 只查一次
+                tag = "sel-" + cc
                 selectors[tag] = self.selector_current(tag)
             sync = {
                 "enabled": self.settings.get("sync_enabled"),
@@ -1258,23 +1318,31 @@ class Service:
                 "tune_mode": self.settings.get("sync_tune_mode", "fallback"),
                 "tune_enabled": self.settings.get("sync_tune_outbound"),
                 "tune_never": self.settings.get("tune_never") or [],
-                "auto_rules": sum(1 for r in self.rules if str(r.get("src") or "").startswith("auto:")),
+                "auto_rules": sum(1 for r in rules if str(r.get("src") or "").startswith("auto:")),
                 "running": self.sync_lock.locked(),
-                "report": getattr(self, "last_sync_report", None),
+                "report": self.last_sync_report,
             }
             amane = {"reachable": False, "proxy": None, "token": bool(self.amane_token()), "error": None}
-            try:
-                hot = self.amane_get_config()
-                amane.update({"reachable": True, "proxy": (hot.get("network") or {}).get("proxy")})
-            except Exception as e:
-                amane["error"] = str(e)[:120]
-            sb_version = None
-            try:
-                if BIN.exists():
-                    sb_version = subprocess.run([str(BIN), "version"], capture_output=True, text=True,
-                                                timeout=15, creationflags=CREATE_NO_WINDOW).stdout.splitlines()[0]
-            except Exception:
-                pass
+            # 面板几秒轮询一次, 这里做 5 秒缓存, 免得每次都去问 Amane (不可达时会拖慢面板)
+            cached = self._amane_cache
+            if cached and (time.time() - cached[0]) < 5:
+                amane.update(cached[1])
+            else:
+                try:
+                    hot = self.amane_get_config()
+                    amane.update({"reachable": True, "proxy": (hot.get("network") or {}).get("proxy")})
+                except Exception as e:
+                    amane["error"] = str(e)[:120]
+                self._amane_cache = (time.time(), {"reachable": amane["reachable"],
+                                                   "proxy": amane["proxy"], "error": amane["error"]})
+            if self._sb_version is None and BIN.exists():
+                try:
+                    self._sb_version = subprocess.run(
+                        [str(BIN), "version"], capture_output=True, text=True,
+                        timeout=15, creationflags=CREATE_NO_WINDOW).stdout.splitlines()[0]
+                except Exception:
+                    self._sb_version = ""
+            sb_version = self._sb_version or None
             return {
                 "version": VERSION,
                 "singbox_version": sb_version,
@@ -1286,13 +1354,12 @@ class Service:
                             for s in self.servers],
                 "probe": self.probe_state,
                 "selectors": selectors,
-                "rules": self.rules,
+                "rules": rules,
                 "presets": {k: {"label": v["label"], "outbound": v["outbound"], "count": len(v["suffixes"])}
                             for k, v in PRESET_RULES.items()},
                 "failover_log": self.failover_log,
                 "amane": amane,
                 "sync": sync,
-                "sync_report": getattr(self, "last_sync_report", None),
                 "ports": {"entry": self.settings["proxy_port"], "panel": self.settings["panel_port"],
                           "clash": self.settings["clash_port"]},
                 "probe_ports": {s["id"]: self.probe_port(s["id"]) for s in self.servers},
@@ -1486,66 +1553,85 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/settings":
                 for k, v in (body or {}).items():
-                    if k in ("probe_url", "default_outbound", "auto_failover", "health_interval",
-                             "log_level", "proxy_port", "panel_port", "clash_port", "tray"):
-                        SVC.settings[k] = v
+                    # 按类型落库, 别让字符串混进端口/间隔这类数值项
+                    if k in ("proxy_port", "panel_port", "clash_port", "health_interval"):
+                        try:
+                            SVC.settings[k] = int(v)
+                        except (TypeError, ValueError):
+                            continue
+                    elif k in ("auto_failover", "tray"):
+                        SVC.settings[k] = as_bool(v)
+                    elif k in ("default_outbound", "log_level"):
+                        SVC.settings[k] = str(v)
                 SVC.save_settings()
                 if "tray" in body:
-                    set_tray(bool(body["tray"]))     # 立即生效, 不用重启管理器
-                if any(k in body for k in ("proxy_port", "clash_port", "log_level")):
-                    SVC.restart()
-                return self._json({"ok": True, "state": SVC.snapshot()})
+                    set_tray(as_bool(body["tray"]))     # 立即生效, 不用重启管理器
+                err = SVC.reload_kernel() if any(
+                    k in body for k in ("proxy_port", "clash_port", "log_level")) else None
+                return self._json({"ok": True, "warning": err, "state": SVC.snapshot()})
 
             if path == "/api/rules":
                 action = body.get("action")
-                if action == "add":
-                    value = (body.get("value") or "").strip().lstrip(".")
-                    if value:
-                        SVC.rules.append({"type": body.get("type") or "domain_suffix",
-                                          "value": value, "outbound": body.get("outbound") or "auto",
-                                          "src": "manual"})
-                elif action == "del":
-                    idx = int(body.get("index", -1))
-                    if 0 <= idx < len(SVC.rules):
-                        SVC.rules.pop(idx)
-                elif action == "insert_preset":
-                    key = body.get("preset")
-                    preset = PRESET_RULES.get(key)
-                    if preset:
-                        have = {r["value"] for r in SVC.rules}
-                        for suffix in preset["suffixes"]:
-                            if suffix not in have:
-                                SVC.rules.append({"type": "domain_suffix", "value": suffix,
-                                                  "outbound": preset["outbound"], "src": "preset:%s" % key})
-                elif action == "remove_preset":
-                    key = body.get("preset")
-                    preset = PRESET_RULES.get(key)
-                    if preset:
-                        SVC.rules = [r for r in SVC.rules if r["value"] not in set(preset["suffixes"])]
-                elif action == "clear_auto":
-                    SVC.rules = [r for r in SVC.rules if not str(r.get("src") or "").startswith("auto:")]
-                elif action == "clear":
-                    SVC.rules = []
-                else:
-                    return self._json({"error": "未知动作"}, 400)
-                SVC.save_rules()
-                SVC.stop_singbox()
-                SVC.start_singbox()
-                return self._json({"ok": True, "state": SVC.snapshot()})
+                # 与后台域名同步线程共用一把锁, 避免「按索引删除」时删除到并发的插入项
+                with SVC.rules_lock:
+                    if action == "add":
+                        value = (body.get("value") or "").strip().lstrip(".")
+                        if value:
+                            SVC.rules.append({"type": body.get("type") or "domain_suffix",
+                                              "value": value, "outbound": body.get("outbound") or "auto",
+                                              "src": "manual"})
+                    elif action == "del":
+                        idx = int(body.get("index", -1))
+                        if 0 <= idx < len(SVC.rules):
+                            SVC.rules.pop(idx)
+                    elif action == "insert_preset":
+                        key = body.get("preset")
+                        preset = PRESET_RULES.get(key)
+                        if preset:
+                            have = {r["value"] for r in SVC.rules}
+                            for suffix in preset["suffixes"]:
+                                if suffix not in have:
+                                    SVC.rules.append({"type": "domain_suffix", "value": suffix,
+                                                      "outbound": preset["outbound"], "src": "preset:%s" % key})
+                    elif action == "remove_preset":
+                        key = body.get("preset")
+                        preset = PRESET_RULES.get(key)
+                        if preset:
+                            SVC.rules = [r for r in SVC.rules if r["value"] not in set(preset["suffixes"])]
+                    elif action == "clear_auto":
+                        SVC.rules = [r for r in SVC.rules if not str(r.get("src") or "").startswith("auto:")]
+                    elif action == "clear":
+                        SVC.rules = []
+                    else:
+                        return self._json({"error": "未知动作"}, 400)
+                    SVC.save_rules()
+                return self._json({"ok": True, "warning": SVC.reload_kernel(), "state": SVC.snapshot()})
 
             if path == "/api/servers":
                 sid = body.get("id")
+                changed = False
+                updated = []
                 for s in SVC.servers:
-                    if s["id"] == sid:
-                        for k in ("label", "cc", "kind", "server", "port", "sni", "insecure", "password", "method", "version", "note", "up_mbps", "down_mbps"):
-                            if k in body:
-                                s[k] = body[k]
-                        for k in ("port", "up_mbps", "down_mbps"):
-                            if k in body:
-                                s[k] = int(body[k])
-                SVC.save_servers()
-                SVC.restart()
-                return self._json({"ok": True, "state": SVC.snapshot()})
+                    if s["id"] != sid:
+                        updated.append(s)
+                        continue
+                    # 改副本 + 整表替换: 读方(build_config/snapshot)只会看到完整的一份, 不会读到半更新
+                    item = dict(s)
+                    for k in ("label", "cc", "kind", "server", "port", "sni", "insecure", "password",
+                              "method", "version", "note", "up_mbps", "down_mbps"):
+                        if k in body:
+                            item[k] = body[k]
+                    for k in ("port", "up_mbps", "down_mbps"):
+                        if k in body:
+                            item[k] = int(body[k])
+                    updated.append(item)
+                    changed = True
+                warning = None
+                if changed:
+                    SVC.servers = updated
+                    SVC.save_servers()
+                    warning = SVC.reload_kernel()
+                return self._json({"ok": True, "warning": warning, "state": SVC.snapshot()})
 
             if path == "/api/server-add":
                 sid = (body.get("id") or "").strip().lower()
@@ -1560,18 +1646,14 @@ class Handler(BaseHTTPRequestHandler):
                     "password": body.get("password") or "", "method": body.get("method") or "none",
                     "up_mbps": int(body.get("up_mbps") or 0), "down_mbps": int(body.get("down_mbps") or 0),
                 })
-                SVC.countries = [s["cc"] for s in SVC.servers]
                 SVC.save_servers()
-                SVC.restart()
-                return self._json({"ok": True, "state": SVC.snapshot()})
+                return self._json({"ok": True, "warning": SVC.reload_kernel(), "state": SVC.snapshot()})
 
             if path == "/api/server-del":
                 sid = body.get("id")
                 SVC.servers = [s for s in SVC.servers if s["id"] != sid]
-                SVC.countries = [s["cc"] for s in SVC.servers]
                 SVC.save_servers()
-                SVC.restart()
-                return self._json({"ok": True, "state": SVC.snapshot()})
+                return self._json({"ok": True, "warning": SVC.reload_kernel(), "state": SVC.snapshot()})
 
             if path == "/api/select":
                 tag = body.get("tag")
@@ -2098,10 +2180,15 @@ def pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid], capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace",
+            out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                                  creationflags=CREATE_NO_WINDOW, timeout=15).stdout
-            return str(pid) in (out or "")
+            # CSV: "映像名称","PID",... ; 按列比对, 别用子串 (pid=12 会误判 1234)
+            for line in (out or "").splitlines():
+                cols = [c.strip().strip('"') for c in line.split('","')]
+                if len(cols) >= 2 and cols[1] == str(pid):
+                    return True
+            return False
         except Exception:
             return False
     try:
@@ -2133,8 +2220,8 @@ def kill_pid(pid: int, tree: bool = True) -> bool:
         return False
     if os.name == "nt":
         args = ["taskkill", "/PID", str(pid)] + (["/T"] if tree else []) + ["/F"]
-        subprocess.run(args, capture_output=True, creationflags=CREATE_NO_WINDOW)
-        return True
+        r = subprocess.run(args, capture_output=True, creationflags=CREATE_NO_WINDOW)
+        return r.returncode == 0
     try:
         os.kill(pid, signal.SIGTERM)
     except Exception:
@@ -2178,8 +2265,10 @@ def cmd_stop() -> int:
     if PID_PATH.exists():
         try:
             pid = int(PID_PATH.read_text().strip())
-            kill_pid(pid, tree=True)
-            killed = True
+            if kill_pid(pid, tree=True):
+                killed = True
+            else:
+                print("停止失败: 进程 %d 可能已退出或权限不足" % pid)
         except Exception as e:
             print("停止失败:", e)
     if SB_PID_PATH.exists():
@@ -2187,7 +2276,7 @@ def cmd_stop() -> int:
             kill_pid(int(SB_PID_PATH.read_text().strip()), tree=False)
         except Exception:
             pass
-    print("已停止" if killed else "没有找到运行中的管理器 (pid 文件不存在)")
+    print("已停止" if killed else "没有找到运行中的管理器 (pid 文件不存在或进程已退出)")
     return 0
 
 
