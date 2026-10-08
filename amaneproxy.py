@@ -767,7 +767,12 @@ class Service:
         if ip in self.geo_cache:
             return self.geo_cache[ip]
         try:
-            data = http_json("http://ip-api.com/json/%s?fields=status,country,countryCode,city,isp" % ip, timeout=12)
+            raw = http_json("https://ipwho.is/" + ip, timeout=12)
+            conn = raw.get("connection") or {}
+            data = {"country": raw.get("country") or "?",
+                    "countryCode": raw.get("country_code") or "?",
+                    "city": raw.get("city") or "",
+                    "isp": conn.get("isp") or ""}
         except Exception as e:
             data = {"country": "?", "countryCode": "?", "city": "", "isp": str(e)[:40]}
         self.geo_cache[ip] = data
@@ -778,12 +783,13 @@ class Service:
         out = {"id": s["id"], "cc": s["cc"], "ts": time.time(), "ok": False, "ip": None, "ms": None, "error": None}
         t0 = time.time()
         try:
-            body = socks_get(port, "ip-api.com", "/json/?fields=status,country,countryCode,city,isp,query", https=False, timeout=20)
+            body = socks_get(port, "ipwho.is", "/", https=True, timeout=20)
             data = json.loads(body.decode("utf-8", "replace"))
-            if data.get("status") == "success":
-                out.update({"ok": True, "ip": data.get("query"),
-                            "country": data.get("country"), "code": data.get("countryCode"),
-                            "city": data.get("city"), "isp": data.get("isp")})
+            if data.get("success"):
+                conn = data.get("connection") or {}
+                out.update({"ok": True, "ip": data.get("ip"),
+                            "country": data.get("country"), "code": data.get("country_code"),
+                            "city": data.get("city"), "isp": conn.get("isp")})
             else:
                 raise RuntimeError(str(data)[:80])
         except Exception as e1:
@@ -1430,8 +1436,20 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+    def _host_ok(self) -> bool:
+        # 面板默认只绑 127.0.0.1, 同源请求的 Host 必是本机地址; 拒绝跨站/DNS 重绑定
+        host = (self.headers.get("Host") or "").split(":")[0].strip("[]").lower()
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return True
+        ph = str(SVC.settings.get("panel_host") or "")
+        if ph in ("", "0.0.0.0", "::"):
+            return True  # 显式绑全地址(容器/局域网), 无法按 Host 过滤
+        return host == ph.lower()
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        if not self._host_ok():
+            return self._json({"error": "forbidden"}, 403)
         try:
             if path in ("/", "/index.html"):
                 html = PANEL_HTML.read_text(encoding="utf-8")
@@ -1443,7 +1461,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     tail = int(self.path.split("tail=")[1].split("&")[0])
                 except Exception:
-                    pass
+                    tail = 200
+                tail = max(1, min(tail, 1000))
                 out = {}
                 for name in ("sing-box.log", "amaneproxy.log"):
                     p = LOGDIR / name
@@ -1453,10 +1472,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(SVC.selftest())
             return self._json({"error": "not found"}, 404)
         except Exception as e:
-            return self._json({"error": str(e), "trace": traceback.format_exc()[-800:]}, 500)
+            log("面板 GET %s 异常: %s\n%s" % (path, e, traceback.format_exc()))
+            return self._json({"error": str(e)}, 500)
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if not self._host_ok():
+            return self._json({"error": "forbidden"}, 403)
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -1687,7 +1709,8 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._json({"error": "not found"}, 404)
         except Exception as e:
-            return self._json({"error": str(e), "trace": traceback.format_exc()[-800:]}, 500)
+            log("面板 POST %s 异常: %s\n%s" % (path, e, traceback.format_exc()))
+            return self._json({"error": str(e)}, 500)
 
 
 def serve_panel() -> ThreadingHTTPServer:
