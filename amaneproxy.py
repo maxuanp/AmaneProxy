@@ -1084,11 +1084,14 @@ class Service:
                 for k, v in status.items() if not v.get("ok")]
 
         # ---- 3) 出口实测调优 (当前出口不通时) ----
+        tuned_before = dict(self.settings.get("tuned_outbound") or {})
         try:
             tune_notes = self.tune_outbounds(status, force=force)
         except Exception as e:
             tune_notes = []
             errors.append("出口调优失败: %s" % str(e)[:100])
+        # 调优会改写 build_config 里规则的出口, 只落盘不重建内核配置则不生效
+        tuned_changed = (self.settings.get("tuned_outbound") or {}) != tuned_before
 
         self.settings["domain_status"] = status
         self.settings["sync_last"] = time.time()
@@ -1109,12 +1112,15 @@ class Service:
         self.settings["sync_log"] = (lines + (self.settings.get("sync_log") or []))[:120]
         self.save_settings()          # 先落盘, 后面重载内核失败也不丢记录
 
-        if len(self.rules) != rules_before:
-            self.save_rules()
+        rules_added = len(self.rules) - rules_before
+        if rules_added or tuned_changed:
+            if rules_added:
+                self.save_rules()
             try:
                 self.stop_singbox()
                 self.start_singbox()
-                log("域名同步新增 %d 条规则, 已重载内核" % (len(self.rules) - rules_before))
+                log("域名同步: 新增 %d 条规则, 调优%s变化, 已重载内核"
+                    % (rules_added, "有" if tuned_changed else "无"))
             except Exception as e:
                 errors.append("重载内核失败: %s" % str(e)[:160])
                 log("域名同步: 重载内核失败 %s" % e)

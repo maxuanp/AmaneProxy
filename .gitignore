@@ -1,0 +1,17 @@
+# 运行期数据：servers.json 明文保存节点密码，logs/ 记录访问过的域名，切勿提交
+servers.json
+amaneproxy.json
+rules.json
+config.json
+*.pid
+logs/
+data/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 本地构建产物
+repo/
+repo.zip
+smoketest/

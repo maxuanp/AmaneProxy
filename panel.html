@@ -85,7 +85,7 @@
     <div class="grid" id="servers"></div>
     <div class="card">
       <h2>出口管理</h2>
-      <table><thead><tr><th>id</th><th>类型</th><th>服务器</th><th>端口</th><th>SNI</th><th>跳过证书</th><th>密码</th><th></th></tr></thead><tbody id="serverEdit"></tbody></table>
+      <table><thead><tr><th>id</th><th>类型</th><th>服务器</th><th>端口</th><th>SNI</th><th>加密方式</th><th>跳过证书</th><th>密码</th><th></th></tr></thead><tbody id="serverEdit"></tbody></table>
       <div class="muted" style="margin:8px 0">密码留空 = 不改动。保存后会自动重启内核（1~2 秒）。</div>
       <h2>新增出口</h2>
       <div class="row">
@@ -94,6 +94,7 @@
         <input id="nsServer" placeholder="服务器地址" style="width:170px">
         <input id="nsPort" placeholder="端口" style="width:80px">
         <input id="nsSni" placeholder="SNI(可选)" style="width:150px">
+        <input id="nsMethod" placeholder="加密方式(SS)" style="width:130px">
         <input id="nsPass" placeholder="密码" style="width:130px">
         <select id="nsCc"><option value="jp">日本</option><option value="kr">韩国</option><option value="us">美国</option><option value="hk">香港</option><option value="sg">新加坡</option></select>
         <button class="primary" onclick="addServer()">新增</button>
@@ -322,6 +323,7 @@ function render(){
       <td><input data-f="server" value="${esc(s.server)}" style="width:150px"></td>
       <td><input data-f="port" value="${esc(s.port)}" style="width:70px"></td>
       <td><input data-f="sni" value="${esc(s.sni||'')}" style="width:130px"></td>
+      <td><input data-f="method" value="${esc(s.method||'')}" placeholder="SS 加密方式" style="width:150px"></td>
       <td><input type="checkbox" data-f="insecure" ${s.insecure?'checked':''}></td>
       <td><input data-f="password" placeholder="${s.has_password?'已设置':'未设置'}" style="width:110px"></td>
       <td><button onclick="saveServer('${esc(s.id)}',this)">保存</button>
@@ -441,6 +443,7 @@ function saveServer(id, btn){
     const f = el.dataset.f;
     if (f === 'insecure') body.insecure = el.checked;
     else if (f === 'password') { if (el.value) body.password = el.value; }
+    else if (f === 'method') { if (el.value) body.method = el.value; }
     else if (f === 'port') { if (el.value) body.port = parseInt(el.value,10); }
     else body[f] = el.value;
   }
@@ -453,6 +456,7 @@ function delServer(id){
 function addServer(){
   const body = {id:$('nsId').value.trim(), kind:$('nsKind').value, server:$('nsServer').value.trim(),
                 port:parseInt($('nsPort').value,10)||0, sni:$('nsSni').value.trim(),
+                method:$('nsMethod').value.trim(),
                 password:$('nsPass').value, cc:$('nsCc').value};
   if (!body.id || !body.server || !body.port) return toast('id / 地址 / 端口 都要填', true);
   post('/api/server-add', body).then(()=>toast('已新增')).catch(()=>{});
